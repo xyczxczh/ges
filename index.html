@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>高一五班成绩管理系统</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .upload-box {
+            border: 2px dashed #cccccc;
+            padding: 30px;
+            text-align: center;
+            margin-bottom: 20px;
+            position: relative;
+            transition: background-color 0.3s;
+        }
+        #fileInput {
+            opacity: 0;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+            min-width: 120px;
+        }
+        th {
+            background-color: #f5f5f5;
+            cursor: pointer;
+            position: sticky;
+            top: 0;
+        }
+        .file-list {
+            margin: 15px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .stats {
+            margin: 20px 0;
+            padding: 20px;
+            background-color: #e9ecef;
+            border-radius: 4px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        .error {
+            color: #dc3545;
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #ffeef0;
+            border-radius: 4px;
+        }
+        .action-buttons {
+            margin: 20px 0;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 10px 20px;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: opacity 0.3s;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        .export-btn {
+            background-color: #007bff;
+        }
+        .clear-btn {
+            background-color: #dc3545;
+        }
+        .progress-bar {
+            height: 5px;
+            background-color: #eee;
+            margin-top: 10px;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .progress {
+            width: 0%;
+            height: 100%;
+            background-color: #28a745;
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <h1>成绩管理系统</h1>
+    
+    <div class="upload-box">
+        <div id="dropZone">
+            <p>点击选择文件或拖拽文件到此区域</p>
+            <p>支持格式：CSV xls xlsx</p>
+            <div class="progress-bar">
+                <div class="progress" id="progressBar"></div>
+            </div>
+        </div>
+        <input type="file" id="fileInput" accept=".csv,.xls,.xlsx" multiple>
+    </div>
+
+    <div class="file-list" id="selectedFiles"></div>
+    <div class="error" id="errorMessage"></div>
+
+    <div class="action-buttons">
+        <button onclick="exportMergedCSV()" class="export-btn">导出整合数据</button>
+        <button onclick="clearLocalData()" class="clear-btn">清除所有数据</button>
+    </div>
+
+    <div class="stats">
+        <div>
+            <h3>基本信息</h3>
+            <p>已上传文件：<span id="fileCount">0</span> 个</p>
+            <p>总记录数：<span id="totalRecords">0</span> 条</p>
+        </div>
+    </div>
+
+    <div id="tableContainer" style="max-height: 600px; overflow: auto;">
+        <table id="dataTable">
+            <thead id="tableHeader"></thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let allData = [];
+        let headers = [];
+        let uploadedFiles = new Set();
+        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+        // 初始化加载本地数据
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedData = localStorage.getItem('mergedScores');
+            if (savedData) {
+                try {
+                    const parsedData = JSON.parse(savedData);
+                    allData = parsedData.allData;
+                    headers = parsedData.headers;
+                    uploadedFiles = new Set(parsedData.uploadedFiles);
+                    updateUI();
+                } catch (error) {
+                    showError('本地数据损坏，已重置系统');
+                    clearLocalData();
+                }
+            }
+        });
+
+        // 文件选择处理
+        document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+        
+        // 拖拽处理
+        const dropZone = document.getElementById('dropZone');
+        dropZone.addEventListener('dragover', handleDragOver);
+        dropZone.addEventListener('dragleave', handleDragLeave);
+        dropZone.addEventListener('drop', handleDrop);
+
+        async function handleFileSelect(e) {
+            const files = Array.from(e.target.files);
+            await processFiles(files);
+        }
+
+        async function processFiles(files) {
+            const errorMsg = document.getElementById('errorMessage');
+            errorMsg.textContent = '';
+            
+            for (const [index, file] of files.entries()) {
+                updateProgress((index + 1) / files.length * 100);
+                
+                if (!isValidFile(file)) continue;
+                if (uploadedFiles.has(file.name)) {
+                    showError(`文件 ${file.name} 已上传过`);
+                    continue;
+                }
+
+                try {
+                    const data = await parseFile(file);
+                    processData(data, file.name);
+                    uploadedFiles.add(file.name);
+                    saveToLocal();
+                } catch (error) {
+                    showError(`解析失败：${file.name} (${error.message})`);
+                }
+            }
+            
+            resetProgress();
+            updateUI();
+        }
+
+        function isValidFile(file) {
+            const validExtensions = ['csv', 'xls', 'xlsx'];
+            const ext = file.name.split('.').pop().toLowerCase();
+            
+            if (!validExtensions.includes(ext)) {
+                showError(`不支持的文件类型：${file.name}`);
+                return false;
+            }
+            if (file.size > MAX_FILE_SIZE) {
+                showError(`文件过大：${file.name} (最大支持10MB)`);
+                return false;
+            }
+            return true;
+        }
+
+        async function parseFile(file) {
+            return file.name.endsWith('.csv') ? 
+                await parseCSV(file) : 
+                await parseExcel(file);
+        }
+
+        async function parseCSV(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    try {
+                        const buffer = e.target.result;
+                        const text = detectEncoding(buffer);
+                        const rows = parseCSVText(text);
+                        resolve(rows);
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                
+                reader.onerror = () => reject(new Error('文件读取失败'));
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        function parseCSVText(text) {
+            return text.split('\n')
+                .map(row => row.trim())
+                .filter(row => row.length > 0)
+                .map(row => parseCSVRow(row));
+        }
+
+        function parseCSVRow(row) {
+            const cells = [];
+            let currentCell = [];
+            let inQuotes = false;
+            let quoteChar = '"';
+
+            for (let i = 0; i < row.length; i++) {
+                const char = row[i];
+                
+                if (char === quoteChar) {
+                    if (inQuotes && row[i+1] === quoteChar) {
+                        currentCell.push(char);
+                        i++;
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                } else if (char === ',' && !inQuotes) {
+                    cells.push(currentCell.join('').trim());
+                    currentCell = [];
+                } else {
+                    currentCell.push(char);
+                }
+            }
+            cells.push(currentCell.join('').trim());
+            return cells;
+        }
+
+        async function parseExcel(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                        const jsonData = XLSX.utils.sheet_to_json(firstSheet, { 
+                            header: 1,
+                            blankrows: false,
+                            defval: ""
+                        });
+                        resolve(jsonData);
+                    } catch (error) {
+                        reject(new Error('Excel解析错误'));
+                    }
+                };
+                
+                reader.onerror = () => reject(new Error('文件读取失败'));
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        function detectEncoding(buffer) {
+            const encodings = ['GB18030', 'GBK', 'GB2312', 'UTF-8'];
+            const decoderOptions = { fatal: true };
+            
+            for (const encoding of encodings) {
+                try {
+                    return new TextDecoder(encoding, decoderOptions).decode(buffer);
+                } catch (e) {
+                    continue;
+                }
+            }
+            return new TextDecoder('GB18030').decode(buffer);
+        }
+
+        function processData(data, filename) {
+            if (headers.length === 0 && data.length > 0) {
+                headers = data[0].map(h => h.trim());
+            }
+
+            const newData = data.slice(1).map(row => {
+                const obj = {};
+                headers.forEach((header, index) => {
+                    obj[header] = (row[index] || '').toString().trim();
+                });
+                return obj;
+            });
+
+            allData = [...allData, ...newData];
+        }
+
+        function updateUI() {
+            updateFileList();
+            updateTable();
+            updateStatistics();
+        }
+
+        function updateFileList() {
+            document.getElementById('selectedFiles').innerHTML = `
+                <strong>已上传文件：</strong>
+                ${Array.from(uploadedFiles).map(f => `
+                    <div class="file-item">📄 ${f}</div>
+                `).join('')}
+            `;
+            document.getElementById('fileCount').textContent = uploadedFiles.size;
+        }
+
+        function updateTable() {
+            if (headers.length === 0) return;
+
+            document.getElementById('tableHeader').innerHTML = `
+                <tr>${headers.map(header => `<th>${header}</th>`).join('')}</tr>
+            `;
+
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = allData.map(row => `
+                <tr>${headers.map(header => `
+                    <td>${row[header]}</td>
+                `).join('')}</tr>
+            `).join('');
+
+            document.getElementById('totalRecords').textContent = allData.length;
+        }
+
+        function updateStatistics() {
+            const scoreHeader = headers.find(h => 
+                h.toLowerCase().includes('分数') || 
+                h.toLowerCase().includes('score')
+            );
+
+            if (scoreHeader) {
+                const scores = allData
+                    .map(row => parseFloat(row[scoreHeader]))
+                    .filter(Number.isFinite)
+                    .sort((a, b) => a - b);
+
+                if (scores.length > 0) {
+                    const total = scores.reduce((a, b) => a + b, 0);
+                    document.getElementById('averageScore').textContent = 
+                        (total / scores.length).toFixed(2);
+                    document.getElementById('maxScore').textContent = 
+                        scores[scores.length - 1];
+                    document.getElementById('minScore').textContent = scores[0];
+                }
+            }
+        }
+
+        function saveToLocal() {
+            const saveData = {
+                allData: allData,
+                headers: headers,
+                uploadedFiles: [...uploadedFiles]
+            };
+            try {
+                localStorage.setItem('mergedScores', JSON.stringify(saveData));
+            } catch (e) {
+                showError('本地存储空间不足，无法保存数据');
+            }
+        }
+
+        function exportMergedCSV() {
+            if (allData.length === 0) {
+                showError('没有可导出的数据');
+                return;
+            }
+
+            const csvContent = [
+                headers.join(','),
+                ...allData.map(row => 
+                    headers.map(header => 
+                        `"${String(row[header]).replace(/"/g, '""')}"`
+                    ).join(',')
+                )
+            ].join('\n');
+
+            const blob = new Blob(["\uFEFF" + csvContent], { 
+                type: 'text/csv;charset=utf-8' 
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `成绩数据_${new Date().toLocaleDateString('zh-CN')}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        function clearLocalData() {
+            if (confirm('确定要清除所有数据吗？此操作不可恢复！')) {
+                allData = [];
+                headers = [];
+                uploadedFiles.clear();
+                localStorage.removeItem('mergedScores');
+                updateUI();
+                showError('所有数据已清除', 'success');
+            }
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            dropZone.style.backgroundColor = '#f8f9fa';
+        }
+
+        function handleDragLeave() {
+            dropZone.style.backgroundColor = '';
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            dropZone.style.backgroundColor = '';
+            const files = Array.from(e.dataTransfer.files);
+            processFiles(files);
+        }
+
+        function updateProgress(percent) {
+            document.getElementById('progressBar').style.width = percent + '%';
+        }
+
+        function resetProgress() {
+            setTimeout(() => {
+                document.getElementById('progressBar').style.width = '0%';
+            }, 500);
+        }
+
+        function showError(message, type = 'error') {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = message;
+            errorDiv.style.color = type === 'success' ? '#28a745' : '#dc3545';
+            errorDiv.style.backgroundColor = type === 'success' ? 
+                '#e6ffed' : '#ffeef0';
+            setTimeout(() => errorDiv.textContent = '', 5000);
+        }
+    </script>
+</body>
+</html>
